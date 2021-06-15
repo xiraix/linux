@@ -16,6 +16,8 @@
  *   Ben-Ami Yassour <benami@il.ibm.com>
  */
 
+#include "cheatcall.h"
+
 #include <linux/kvm_host.h>
 #include "irq.h"
 #include "ioapic.h"
@@ -8428,6 +8430,11 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		a1 &= 0xFFFFFFFF;
 		a2 &= 0xFFFFFFFF;
 		a3 &= 0xFFFFFFFF;
+	}
+	
+	if(nr == KVM_HC_CHEATCALL){
+		ret = cheatcall_do(vcpu, a0, a1, a2, a3);
+		goto out;
 	}
 
 	if (static_call(kvm_x86_get_cpl)(vcpu) != 0) {
