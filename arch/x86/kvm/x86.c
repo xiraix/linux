@@ -8409,17 +8409,24 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 	unsigned long nr, a0, a1, a2, a3, ret;
 	int op_64_bit;
 
-	if (kvm_xen_hypercall_enabled(vcpu->kvm))
-		return kvm_xen_hypercall(vcpu);
-
-	if (kvm_hv_hypercall_enabled(vcpu))
-		return kvm_hv_hypercall(vcpu);
-
 	nr = kvm_rax_read(vcpu);
 	a0 = kvm_rbx_read(vcpu);
 	a1 = kvm_rcx_read(vcpu);
 	a2 = kvm_rdx_read(vcpu);
 	a3 = kvm_rsi_read(vcpu);
+
+	pr_err("--KVM-- Entered kvm_emulate_hypercall: nr -> %lu\n", nr);
+
+	if(nr == KVM_HC_CHEATCALL){
+		ret = cheatcall_do(vcpu, a0, a1, a2, a3);
+		goto out;
+	}
+
+	if (kvm_xen_hypercall_enabled(vcpu->kvm))
+		return kvm_xen_hypercall(vcpu);
+
+	if (kvm_hv_hypercall_enabled(vcpu))
+		return kvm_hv_hypercall(vcpu);
 
 	trace_kvm_hypercall(nr, a0, a1, a2, a3);
 
@@ -8430,11 +8437,6 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		a1 &= 0xFFFFFFFF;
 		a2 &= 0xFFFFFFFF;
 		a3 &= 0xFFFFFFFF;
-	}
-	
-	if(nr == KVM_HC_CHEATCALL){
-		ret = cheatcall_do(vcpu, a0, a1, a2, a3);
-		goto out;
 	}
 
 	if (static_call(kvm_x86_get_cpl)(vcpu) != 0) {
