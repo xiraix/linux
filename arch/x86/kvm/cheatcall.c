@@ -1,10 +1,13 @@
 #include "cheatcall.h"
 
 #include <linux/printk.h>
+#include <linux/slab.h>
 
 #include "kvm_emulate.h"
+#include "kvm_cache_regs.h"
 #include "x86.h"
 
+unsigned long target_cr3 = 0;
 
 enum CC_COMMAND_ID{
 	PHYSICAL_READ,
@@ -24,16 +27,58 @@ void dump_cmd(struct CC_COMMAND* cmd){
 		"id: %u\n"
 		"from: %lu\n"
 		"to: %lu\n"
+		"size: %lu\n"
 		"--------\n\n",
-		cmd->id, cmd->from, cmd->to
+		cmd->id, cmd->from, cmd->to, cmd->size
 	);
 }
 
+void do_virtual_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
+{
+	struct x86_exception exception = {0};
+	unsigned long caller_cr3 = 0;
+	int ret;
+
+	unsigned long from_va = cmd->from;
+	unsigned long to_va = cmd->to;
+	unsigned long size = cmd->size;
+
+	void* buffer = kmalloc(size, GFP_KERNEL);
+
+	if(
+		!from_va || !to_va || !size || !buffer
+	){
+		pr_err("do_virtual_read: FAILED - BAD cmd");
+		goto out;
+	}
+
+	if(!target_cr3){
+		pr_err("do_virtual_read: FAILED - target_cr3 not configured\n");
+		goto out;
+	}
+
+	//back up original cr3 before switching context
+	caller_cr3 = kvm_get_cr3(vcpu);
+
+	kvm_set_cr3(vcpu, target_cr3);
+	/*
+static int kvm_read_guest_virt_helper(gva_t addr, void *val, unsigned int bytes,
+				      struct kvm_vcpu *vcpu, u32 access,
+				      struct x86_exception *exception)
+	*/
+	kvm_read_guest_virt_helper()
+
+	kvm_set_cr3(vcpu, caller_cr3)
+
+out:
+	if(buffer){
+		kfree(buffer);
+		return;
+	}
+}
 
 void do_physical_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
-	//TODO: USE PROPER MEMORY ALLCATION
-	char* buffer[0x20];
 	struct x86_exception exception = {0};
 	int ret;
 
@@ -41,8 +86,10 @@ void do_physical_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 	unsigned long to_va = cmd->to;
 	unsigned long size = cmd->size;
 
+	void* buffer = kmalloc(size, GFP_KERNEL);
+
 	if(
-		(from_pa && to_va && size) == 0
+		!!from_pa || !to_va || !size || !buffer
 	){
 		pr_err("do_physcal_read: FAILED - BAD cmd");
 		goto out;
@@ -61,6 +108,9 @@ void do_physical_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 	}
 
 out:
+	if(buffer){
+		kfree(buffer);
+	}
 	return;
 
 }
@@ -68,8 +118,6 @@ out:
 
 void do_physical_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
-	//TODO: USE PROPER MEMORY ALLCATION
-	char* buffer[0x20];
 	struct x86_exception exception = {0};
 	int ret;
 
@@ -77,8 +125,10 @@ void do_physical_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 	unsigned long to_pa = cmd->to;
 	unsigned long size = cmd->size;
 
+	void* buffer = kmalloc(size, GFP_KERNEL);
+
 	if(
-		(from_va && to_pa && size) == 0
+		!from_va || !to_pa || !size || !buffer
 	){
 		pr_err("do_physical_write: FAILED - BAD cmd");
 		goto out;
@@ -96,8 +146,10 @@ void do_physical_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 		goto out;
 	}
 
-
 out:
+	if(buffer){
+		kfree(buffer);
+	}
 	return;
 
 }
@@ -126,6 +178,7 @@ int cheatcall_do(struct kvm_vcpu* vcpu, unsigned long a0, unsigned long a1, unsi
 		);
 	}
 	dump_cmd(&cmd);
+
 
 	switch(cmd.id){
 		case PHYSICAL_READ:
