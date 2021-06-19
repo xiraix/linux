@@ -68,7 +68,7 @@ out:
 
 
 //from is gva
-//to is pgpa
+//to is gpa
 void do_physical_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
 	//TODO: USE PROPER MEMORY ALLCATION
