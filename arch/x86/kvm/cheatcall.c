@@ -29,8 +29,7 @@ void dump_cmd(struct CC_COMMAND* cmd){
 	);
 }
 
-//from is gva
-//to is pgpa
+
 void do_physical_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
 	//TODO: USE PROPER MEMORY ALLCATION
@@ -67,8 +66,6 @@ out:
 }
 
 
-//from is gva
-//to is gpa
 void do_physical_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
 	//TODO: USE PROPER MEMORY ALLCATION
