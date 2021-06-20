@@ -10,6 +10,7 @@
 unsigned long target_cr3 = 0;
 
 enum CC_COMMAND_ID{
+	HV_TEST,
 	PHYSICAL_READ,
 	PHYSICAL_WRITE,
 };
@@ -32,6 +33,54 @@ void dump_cmd(struct CC_COMMAND* cmd){
 		cmd->id, cmd->from, cmd->to, cmd->size
 	);
 }
+
+
+void do_test(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
+{
+	struct x86_exception exception = {0};
+	u64 kernel_gs = 0;
+	u64 pkthread = 0;
+	//u64 pkprocess = 0;
+
+	//unsigned long caller_cr3 = 0;
+	int ret;
+
+	unsigned long from_va = cmd->from;
+	unsigned long to_va = cmd->to;
+	unsigned long size = cmd->size;
+
+	void* buffer = kmalloc(size, GFP_KERNEL);
+
+	if(
+		!from_va || !to_va || !size || !buffer
+	){
+		pr_err("do_test: FAILED - BAD cmd");
+		goto out;
+	}
+
+	ret = kvm_get_msr(vcpu, MSR_KERNEL_GS_BASE, &kernel_gs);
+	if(ret){
+		pr_err("do_test: kvm_get_msr failed with %u\n", ret);
+		goto out;
+	}
+
+	pr_err("do_test: kernel_gs is %p", (void*)kernel_gs);
+
+	ret = kvm_read_guest_virt_helper(kernel_gs + 0x8, &pkthread, sizeof(unsigned long), vcpu, 0, &exception);
+	if(ret != X86EMUL_CONTINUE){
+		pr_err("do_test: kvm_read_guest_virt_helper failed with %u, e: %u\n", ret, exception.error_code);
+		goto out;
+	}
+
+	pr_err("pkthread is %p\n", (void*)pkthread);
+
+out:
+	if(buffer){
+		kfree(buffer);
+		return;
+	}
+}
+
 
 void do_virtual_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
@@ -58,17 +107,25 @@ void do_virtual_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 	}
 
 	//back up original cr3 before switching context
-	caller_cr3 = kvm_get_cr3(vcpu);
+	caller_cr3 = kvm_read_cr3(vcpu);
 
+	//attach to target process
 	kvm_set_cr3(vcpu, target_cr3);
-	/*
-static int kvm_read_guest_virt_helper(gva_t addr, void *val, unsigned int bytes,
-				      struct kvm_vcpu *vcpu, u32 access,
-				      struct x86_exception *exception)
-	*/
-	kvm_read_guest_virt_helper()
 
-	kvm_set_cr3(vcpu, caller_cr3)
+	ret = kvm_read_guest_virt_helper(from_va, buffer, size, vcpu, 0, &exception);
+	if(ret != X86EMUL_CONTINUE){
+		pr_err("do_virtual_read: FAILED - kvm_read_guest_virt_helper failed with %u\n", ret);
+		goto out;
+	}
+
+	//return to caller process
+	kvm_set_cr3(vcpu, caller_cr3);
+
+	ret = kvm_write_guest_virt_system(vcpu, to_va, buffer, size, &exception);
+	if(ret != X86EMUL_CONTINUE){
+		pr_err("do_virtual_read: FAILED - kvm_write_guest_virt_system failed with %u", ret);
+		goto out;
+	}
 
 out:
 	if(buffer){
@@ -181,6 +238,9 @@ int cheatcall_do(struct kvm_vcpu* vcpu, unsigned long a0, unsigned long a1, unsi
 
 
 	switch(cmd.id){
+		case HV_TEST:
+			do_test(vcpu, &cmd);
+			break;
 		case PHYSICAL_READ:
 			do_physical_read(vcpu, &cmd);
 			break;
