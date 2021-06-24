@@ -61,7 +61,6 @@ static int try_read_guest_virt(struct kvm_vcpu* vcpu, unsigned long gva_from, vo
 
 	kvm_set_cr3(vcpu, target_cr3);
 
-
 	ret = kvm_read_guest_virt(vcpu, gva_from, hva_to, size, &exception);
 	if(ret != X86EMUL_CONTINUE){
 		pr_err("do_virtual_read: FAILED - kvm_read_guest_virt failed with %u\n", ret);
@@ -90,8 +89,7 @@ static int try_write_guest_virt(struct kvm_vcpu* vcpu, void* hva_from, unsigned 
 
 	kvm_set_cr3(vcpu, target_cr3);
 
-
-	ret = kvm_write_guest_virt_helper(gva_to, hva_from, size, vcpu, 0, &exception);
+	ret = kvm_write_guest_virt_helper(gva_to, hva_from, size, vcpu, PFERR_WRITE_MASK | PFERR_USER_MASK, &exception);
 	if(ret != X86EMUL_CONTINUE){
 		pr_err("do_virtual_read: FAILED - kvm_write_guest_virt_helper failed with %u", ret);
 		dump_exception(&exception);
@@ -100,6 +98,7 @@ static int try_write_guest_virt(struct kvm_vcpu* vcpu, void* hva_from, unsigned 
 		if(ret != X86EMUL_CONTINUE){
 			pr_err("do_virtual_read: FAILED - kvm_write_guest_virt_system failed with %u", ret);
 			dump_exception(&exception);
+			memset(&exception, 0, sizeof(struct x86_exception));
 		}
 	}
 
