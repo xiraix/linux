@@ -6275,7 +6275,7 @@ static int kvm_read_guest_phys_system(struct x86_emulate_ctxt *ctxt,
 	return r < 0 ? X86EMUL_IO_NEEDED : X86EMUL_CONTINUE;
 }
 
-static int kvm_write_guest_virt_helper(gva_t addr, void *val, unsigned int bytes,
+int kvm_write_guest_virt_helper(gva_t addr, void *val, unsigned int bytes,
 				      struct kvm_vcpu *vcpu, u32 access,
 				      struct x86_exception *exception)
 {

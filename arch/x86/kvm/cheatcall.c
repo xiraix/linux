@@ -24,6 +24,20 @@ struct CC_COMMAND {
 	unsigned long target_cr3;
 };
 
+void dump_exception(struct x86_exception* e){
+	pr_err(
+		"---Exception---\n"
+		"vector: %hhu\n"
+		"error_code_valid: %hhu\n"
+		"error_code: %hu\n"
+		"nested_page_fault: %hhu\n"
+		"address: %llu\n"
+		"async_page_fault: %hhu\n"
+		"--------------\n",
+		e->vector, e->error_code, e->error_code_valid, e->nested_page_fault, e->address, e->async_page_fault
+	);
+}
+
 void dump_cmd(struct CC_COMMAND* cmd){
 	pr_err(
 		"----CC_COMMAND----\n"
@@ -38,11 +52,67 @@ void dump_cmd(struct CC_COMMAND* cmd){
 }
 
 
+static int try_read_guest_virt(struct kvm_vcpu* vcpu, unsigned long gva_from, void* hva_to, unsigned long size, unsigned long target_cr3){
+	struct x86_exception exception = {0};
+	int ret;
+	
+	unsigned long caller_cr3 = kvm_read_cr3(vcpu);
+	target_cr3 = target_cr3 ? target_cr3 : caller_cr3;
+
+	kvm_set_cr3(vcpu, target_cr3);
+
+
+	ret = kvm_read_guest_virt(vcpu, gva_from, hva_to, size, &exception);
+	if(ret != X86EMUL_CONTINUE){
+		pr_err("do_virtual_read: FAILED - kvm_read_guest_virt failed with %u\n", ret);
+		dump_exception(&exception);
+		memset(&exception, 0, sizeof(struct x86_exception));
+		ret = kvm_read_guest_virt_helper(gva_from, hva_to, size, vcpu, 0, &exception);
+		if(ret != X86EMUL_CONTINUE){
+			pr_err("do_virtual_read: FAILED - kvm_read_guest_virt_helper failed with %u\n", ret);
+			dump_exception(&exception);
+		}
+	}
+
+	kvm_set_cr3(vcpu, caller_cr3);
+
+	return ret;
+
+}
+
+static int try_write_guest_virt(struct kvm_vcpu* vcpu, void* hva_from, unsigned long gva_to, unsigned long size, unsigned long target_cr3){
+	struct x86_exception exception = {0};
+	int ret;
+
+	unsigned long caller_cr3 = kvm_read_cr3(vcpu);
+	target_cr3 = target_cr3 ? target_cr3 : caller_cr3;
+
+
+	kvm_set_cr3(vcpu, target_cr3);
+
+
+	ret = kvm_write_guest_virt_helper(gva_to, hva_from, size, vcpu, 0, &exception);
+	if(ret != X86EMUL_CONTINUE){
+		pr_err("do_virtual_read: FAILED - kvm_write_guest_virt_helper failed with %u", ret);
+		dump_exception(&exception);
+		memset(&exception, 0, sizeof(struct x86_exception));
+		ret = kvm_write_guest_virt_system(vcpu, gva_to, hva_from, size, &exception);
+		if(ret != X86EMUL_CONTINUE){
+			pr_err("do_virtual_read: FAILED - kvm_write_guest_virt_system failed with %u", ret);
+			dump_exception(&exception);
+		}
+	}
+
+	kvm_set_cr3(vcpu, caller_cr3);
+
+	return ret;
+}
+
 void do_read_msr(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
-	struct x86_exception exception = {0};
 	u64 msr_value = 0;
 	int ret;
+	unsigned long temp0;
 
 	unsigned long msr_index = cmd->from;
 	unsigned long to_va = cmd->to;
@@ -52,19 +122,21 @@ void do_read_msr(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 	if(
 		!msr_index || !to_va || size != sizeof(msr_value) /*8*/
 	){
-		pr_err("do_test: FAILED - BAD cmd");
+		pr_err("do_read_msr: FAILED - BAD cmd");
 		goto out;
 	}
+
+	ret = try_read_guest_virt(vcpu, to_va, &temp0, 8, 0);
+	pr_err("msr buffer to_va: %lu, ret: %u\n", temp0, ret);
 
 	ret = kvm_get_msr(vcpu, msr_index, &msr_value);
 	if(ret){
-		pr_err("do_test: kvm_get_msr failed with %u\n", ret);
+		pr_err("do_read_msr: kvm_get_msr failed with %u\n", ret);
 		goto out;
 	}
 
-	ret = kvm_read_guest_virt_helper(to_va, &msr_value, sizeof(msr_value), vcpu, 0, &exception);
+	ret = try_write_guest_virt(vcpu, &msr_value, to_va, sizeof(msr_value), 0);
 	if(ret != X86EMUL_CONTINUE){
-		pr_err("do_test: kvm_read_guest_virt_helper failed with %u, e: %u\n", ret, exception.error_code);
 		goto out;
 	}
 
@@ -75,14 +147,12 @@ out:
 
 
 void do_virtual_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd){
-	struct x86_exception exception = {0};
-	unsigned long caller_cr3 = 0;
 	int ret;
 
 	unsigned long from_va = cmd->from;
 	unsigned long to_va = cmd->to;
 	unsigned long size = cmd->size;
-	unsigned long target_cr3 = cmd->target_cr3;
+	unsigned long target_cr3 = cmd->target_cr3 ;
 
 	void* buffer = kmalloc(size, GFP_KERNEL);
 
@@ -93,37 +163,17 @@ void do_virtual_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd){
 		goto out;
 	}
 
-	//back up original cr3 before switching context
-	caller_cr3 = kvm_read_cr3(vcpu);
-
-	//opererate on caller process
-	if(!target_cr3){
-		pr_err("do_virtual_read: target_cr3 not configured. assuming local\n");
-	}
-	//operate on remote process
-	else{
-		pr_err("do_virtual_read: target_cr3 is %lu\n", target_cr3);
-		//attach to target process
-		kvm_set_cr3(vcpu, target_cr3);
-	}
-
 	//---------- now operating inside remote AS ----------
 
-	ret = kvm_read_guest_virt_helper(from_va, buffer, size, vcpu, 0, &exception);
+	ret = try_read_guest_virt(vcpu, from_va, buffer, size, target_cr3);
 	if(ret != X86EMUL_CONTINUE){
-		pr_err("do_virtual_read: FAILED - kvm_read_guest_virt_helper failed with %u\n", ret);
-		kvm_set_cr3(vcpu, caller_cr3);
 		goto out;
 	}
 
 	//--------------------------------------------------
 
-	//re-attach to caller AS. no effect if already attached
-	kvm_set_cr3(vcpu, caller_cr3);
-
-	ret = kvm_write_guest_virt_system(vcpu, to_va, buffer, size, &exception);
+	ret = try_write_guest_virt(vcpu, buffer, to_va, size, 0);
 	if(ret != X86EMUL_CONTINUE){
-		pr_err("do_virtual_read: FAILED - kvm_write_guest_virt_system failed with %u", ret);
 		goto out;
 	}
 
@@ -135,14 +185,14 @@ out:
 }
 
 void do_virtual_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd){
-	struct x86_exception exception = {0};
-	unsigned long caller_cr3 = 0;
 	int ret;
 
 	unsigned long from_va = cmd->from;
 	unsigned long to_va = cmd->to;
 	unsigned long size = cmd->size;
+
 	unsigned long target_cr3 = cmd->target_cr3;
+
 
 	void* buffer = kmalloc(size, GFP_KERNEL);
 
@@ -154,39 +204,19 @@ void do_virtual_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd){
 	}
 
 	//read memory from local AS to write
-	ret = kvm_read_guest_virt_helper(from_va, buffer, size, vcpu, 0, &exception);
+	ret = try_read_guest_virt(vcpu, from_va, buffer, size, 0);
 	if(ret != X86EMUL_CONTINUE){
-		pr_err("do_virtual_write: FAILED - kvm_read_guest_virt_helper failed with %u\n", ret);
 		goto out;
-	}
-
-	//back up original cr3 before switching context
-	caller_cr3 = kvm_read_cr3(vcpu);
-
-	//opererate on caller process
-	if(!target_cr3){
-		pr_err("do_virtual_write: target_cr3 not configured. assuming local\n");
-	}
-	//operate on remote process
-	else{
-		pr_err("do_virtual_write: target_cr3 is %lu\n", target_cr3);
-		//attach to target process
-		kvm_set_cr3(vcpu, target_cr3);
 	}
 
 	//---------- now operating inside remote AS ----------
 
-	ret = kvm_write_guest_virt_system(vcpu, to_va, buffer, size, &exception);
+	ret = try_write_guest_virt(vcpu, buffer, to_va, size, target_cr3);
 	if(ret != X86EMUL_CONTINUE){
-		pr_err("do_virtual_write: FAILED - kvm_write_guest_virt_system failed with %u", ret);
-		kvm_set_cr3(vcpu, caller_cr3);
 		goto out;
 	}
 
 	//--------------------------------------------------
-
-	//re-attach to caller AS. no effect if already attached
-	kvm_set_cr3(vcpu, caller_cr3);
 
 out:
 	if(buffer){
@@ -197,7 +227,6 @@ out:
 
 void do_physical_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
-	struct x86_exception exception = {0};
 	int ret;
 
 	unsigned long from_pa = cmd->from;
@@ -219,9 +248,8 @@ void do_physical_read(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 		goto out;
 	}
 
-	kvm_write_guest_virt_system(vcpu, to_va, buffer, size, &exception);
+	try_write_guest_virt(vcpu, buffer, to_va, size, 0);
 	if(ret !=  X86EMUL_CONTINUE){
-		pr_err("do_physcal_read: FAILED - kvm_write_guest_virt_system failed with %u", ret);
 		goto out;
 	}
 
@@ -236,7 +264,6 @@ out:
 
 void do_physical_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 {
-	struct x86_exception exception = {0};
 	int ret;
 
 	unsigned long from_va = cmd->from;
@@ -252,9 +279,9 @@ void do_physical_write(struct kvm_vcpu* vcpu, struct CC_COMMAND* cmd)
 		goto out;
 	}
 
-	ret = kvm_read_guest_virt(vcpu, from_va, buffer, size, &exception);
+	ret = try_read_guest_virt(vcpu, from_va, buffer, size, 0);
 	if(ret != X86EMUL_CONTINUE){
-		pr_err("do_physical_write: FAILED - Exception code: %u", exception.error_code);
+		pr_err("do_physical_write: FAILED - with: %u", ret);
 		goto out;
 	}
 
@@ -274,7 +301,6 @@ out:
 
 int cheatcall_do(struct kvm_vcpu* vcpu, unsigned long a0, unsigned long a1, unsigned long a2, unsigned long a3){
 	struct CC_COMMAND cmd = {0};
-	struct x86_exception exception = {0};
 	int ret = 0;
 
 	pr_err("cheatcall! a0: %lu, a1: %lu, a2: %lu, a3: %lu\n", a0, a1, a2, a3);
@@ -284,15 +310,14 @@ int cheatcall_do(struct kvm_vcpu* vcpu, unsigned long a0, unsigned long a1, unsi
 		return 0;
 	}
 
-	ret = kvm_read_guest_virt(vcpu, a0, &cmd, sizeof(cmd), &exception);
+	ret = try_read_guest_virt(vcpu, a0, &cmd, sizeof(cmd), 0);
 	
 	//fail condition not tested
-	if(ret != X86EMUL_CONTINUE || exception.error_code != 0){
+	if(ret != X86EMUL_CONTINUE){
 		pr_err(
 			"Failed to fetch command struct with\n"
-			"\treturn: %u\n"
-			"\terror_code: %u\n",
-			ret, exception.error_code
+			"\treturn: %u\n",
+			ret
 		);
 	}
 	dump_cmd(&cmd);

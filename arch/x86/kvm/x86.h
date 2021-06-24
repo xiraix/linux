@@ -319,6 +319,10 @@ int kvm_write_guest_virt_system(struct kvm_vcpu *vcpu,
 	gva_t addr, void *val, unsigned int bytes,
 	struct x86_exception *exception);
 
+int kvm_write_guest_virt_helper(gva_t addr, void *val, unsigned int bytes,
+				      struct kvm_vcpu *vcpu, u32 access,
+				      struct x86_exception *exception);
+
 int handle_ud(struct kvm_vcpu *vcpu);
 
 void kvm_deliver_exception_payload(struct kvm_vcpu *vcpu);
